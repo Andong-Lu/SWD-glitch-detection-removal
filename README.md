@@ -7,23 +7,12 @@ The method is described in:
 
 > Andong Lu, Qingming Li (2026), *A New Framework for the Detection and Removal of Glitches in InSight Seismic Data*, submitted to *Seismological Research Letters*.
 
-## Method overview
-
-The recorded signal \( x(t) \) is decomposed into:
-- glitch and spike components \( g(t) \)
-- remaining seismic signal \( y(t) \)
-
-The deglitched signal is obtained as:
-\[
-y(t) = x(t) - g(t)
-\]
-
 ## Repository structure
 
-- `run_deglitch.py` — main entry script (user-editable parameters)
+- `run_deglitch.py` — main entry script
 - `swd_deglitch.py` — SWD-based detection and removal algorithm
 - `SWTools.py` — SWD implementation
-- `data/` — placeholder (raw data not included)
+- `data/` — placeholder
 - `output/` — generated outputs
 
 ## Data
@@ -58,3 +47,4 @@ The deglitched seismic records and detected glitch time intervals will be writte
 ## License
 
 This project is released under the MIT License.
+
