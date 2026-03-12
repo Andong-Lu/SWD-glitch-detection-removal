@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Created on Tue Feb  3 21:30:54 2026
+Created on Thu Mar 12 16:17:42 2026
 
 @author: Andong Lu
 """
@@ -214,11 +214,11 @@ def deglitch_trace_swd(tr: Trace, cfg: DeglitchConfig) -> Tuple[Trace, np.ndarra
 
         # Spike modelling around each detected glitch region
         if len(indices) > 0:
-            x_minus_glitch = x - (np.sum(g_comps, axis=1) if g_comps.shape[1] > 0 else 0.0)
-            amp_bg = float(np.mean(x_minus_glitch))
-
             for i in range(len(g_st)):
-                # seconds from window start
+                # Recompute current residual using all components found so far
+                x_minus_glitch = x - (np.sum(g_comps, axis=1) if g_comps.shape[1] > 0 else 0.0)
+                amp_bg = float(np.mean(x_minus_glitch))
+
                 sp_s = (g_st[i] - win_s) - cfg.spike_pad_before
                 sp_e = (g_et[i] - win_s) + cfg.spike_pad_after
                 sp_s = max(0.0, float(sp_s))
@@ -230,7 +230,9 @@ def deglitch_trace_swd(tr: Trace, cfg: DeglitchConfig) -> Tuple[Trace, np.ndarra
 
                 amp_x_sp = np.abs(x_sp - amp_bg)
 
-                while np.max(amp_x_sp) > amp_thr:
+                iter_sp = 0
+                max_spike_loops = 5
+                while np.max(amp_x_sp) > amp_thr and iter_sp < max_spike_loops:
                     kmax = int(np.argmax(amp_x_sp))
                     hw = int(cfg.spike_mask_halfwidth * sr)
                     i0 = max(0, kmax - hw)
@@ -240,13 +242,24 @@ def deglitch_trace_swd(tr: Trace, cfg: DeglitchConfig) -> Tuple[Trace, np.ndarra
                     x_focus[:i0] = amp_bg
                     x_focus[i1:] = amp_bg
 
-                    swd_s = SWdecomp(x_focus, t, MaxIter=cfg.max_iter_spike, ErrTol=cfg.err_tol, target_type="spike")
+                    swd_s = SWdecomp(
+                        x_focus,
+                        t,
+                        MaxIter=cfg.max_iter_spike,
+                        ErrTol=cfg.err_tol,
+                        target_type="spike",
+                    )
+
                     spike_comp = swd_s.comps.reshape(-1)
 
-                    g_comps = np.hstack((g_comps, swd_s.comps))
+                    # Guard against empty / zero / useless fits
+                    if not np.any(np.abs(spike_comp) > 0):
+                        break
 
+                    g_comps = np.hstack((g_comps, swd_s.comps))
                     x_sp = x_sp - spike_comp
                     amp_x_sp = np.abs(x_sp - amp_bg)
+                    iter_sp += 1
 
         # Record merged intervals for reporting (glitch + spikes)
         if g_comps.shape[1] > 0:
