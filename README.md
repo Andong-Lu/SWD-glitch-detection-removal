@@ -5,7 +5,7 @@ based method for detecting and removing glitches and onset spikes in planetary s
 
 The method is described in:
 
-> Andong Lu, Qingming Li (2026), *A New Framework for the Detection and Removal of Glitches in InSight Seismic Data*, submitted to *Seismological Research Letters*.
+> Andong Lu, Qingming Li (2026), *A New Framework for the Detection and Removal of Glitches in InSight Seismic Data*, manuscript under review.
 
 ## Repository structure
 
