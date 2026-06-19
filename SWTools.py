@@ -1,22 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-Created on Thu Feb 20 16:52:09 2025
+Created on Sat Jun 13 22:30:17 2026
 
 @author: Andong Lu
 """
-import time
+#%%
 from tqdm import tqdm
 import numpy as np
 from scipy.optimize import least_squares
+from scipy.signal import find_peaks
 
-class SWs:
-    def __init__(self, raw_wave, time, params):
-        self.raw_wave = raw_wave
-        self.t = time
-        self.dt = time[1]-time[0]
-        self.params=params
-        self.comps=SWdecomp.recon(params, time)
-
+#%%
 class SWdecomp:
     def __init__(self, raw_wave, time, **kwargs):
         self.raw_wave = raw_wave
@@ -35,20 +29,17 @@ class SWdecomp:
              ZetaList=np.array([0.01, 0.1, 1, 10]),
              PhisList=np.array([0, np.pi/2, np.pi, 3*np.pi/2]),
              MaxIter=50,
-             MaxGridRefine=5):
-        """
-        Perform Shock Waveform Decomposition (_swd) with these termination conditions:
+             MaxGridRefine=5,
+             MinZeta=0.0001,
+             MinGlitchFreq=0.0,
+             TauPeakDistance=0.0,
+             TauPeakProminenceMAD=0.0,
+             LocalFitPadding=0.0,
+             LocalFitOutsidePenalty=0.0,
+             ShowProgress=True):
+        """Perform shock waveform decomposition."""
 
-        1) No positive-frequency content or no spectral peaks above threshold.
-        2) Failed to find a valid atom after MaxGridRefine grid refinements.
-        3) Residual energy criterion met.
-        4) Maximum iterations exceeded.
-        """
-        # Notify start and record time
-        print("\nStarting decomposition...")
-        start_time = time.time()
-
-        # Preprocessing: shift time to start at zero and remove mean
+        # Remove the mean and shift time to zero.
         t = self.t - self.t[0]
         y0 = self.raw_wave - np.mean(self.raw_wave)
         r = y0.copy()
@@ -57,39 +48,84 @@ class SWdecomp:
         selected_params = []
         selected_waveforms = []
 
-        # Main decomposition loop with progress bar
-        for iteration in tqdm(range(MaxIter), desc="SWdecomp iterations", unit="iter"):
-            # 1. pick time-shift candidates based on residual peaks
-            tau_candidates = t[np.argsort(-np.abs(r))[:TauTopNum]]
+        for _ in tqdm(
+            range(MaxIter),
+            desc="SWdecomp iterations",
+            unit="iter",
+            disable=not ShowProgress,
+        ):
+            # Select candidate residual peaks.
+            abs_r = np.abs(r)
+            use_distinct_peaks = TauPeakDistance > 0 or TauPeakProminenceMAD > 0
 
-            # 2. determine frequency bounds via FFT
+            if use_distinct_peaks:
+                peak_kwargs = {}
+
+                if TauPeakDistance > 0:
+                    peak_kwargs["distance"] = max(
+                        1,
+                        int(round(TauPeakDistance / self.dt)),
+                    )
+
+                residual_mad = np.median(np.abs(r - np.median(r)))
+                if TauPeakProminenceMAD > 0 and residual_mad > 0:
+                    peak_kwargs["prominence"] = TauPeakProminenceMAD * residual_mad
+
+                peak_indices, _ = find_peaks(abs_r, **peak_kwargs)
+
+                if peak_indices.size > 0:
+                    peak_order = peak_indices[np.argsort(-abs_r[peak_indices])]
+                    tau_candidates = t[peak_order[:TauTopNum]]
+                else:
+                    tau_candidates = t[np.argsort(-abs_r)[:TauTopNum]]
+            else:
+                tau_candidates = t[np.argsort(-abs_r)[:TauTopNum]]
+
+            local_bounds = (
+                self.local_fit_bounds(
+                    tau_candidates,
+                    t[0],
+                    t[-1],
+                    LocalFitPadding,
+                )
+                if target_type == "glitch"
+                else {}
+            )
+
+            # Set frequency bounds.
             freqs = np.fft.fftfreq(len(t), d=self.dt)
             spectrum = np.fft.fft(r)
             pos = freqs > 0
             P = np.abs(spectrum[pos])
             f_pos = freqs[pos]
             if P.size == 0 or P.max() == 0:
-                print("\nTerminated: no positive-frequency content in residual.")
                 break
             peaks = np.where(P > P.max()/10)[0]
             if peaks.size == 0:
-                print("\nTerminated: no significant spectral peaks above threshold.")
                 break
 
             if target_type == 'spike':
                 high_hz = f_pos[min(peaks.max()-1, len(f_pos)-1)]
-            if target_type == 'glitch':
+            elif target_type == 'glitch':
                 high_hz = min(1, f_pos[min(peaks.max()-1, len(f_pos)-1)])
+            else:
+                raise ValueError("target_type must be 'glitch' or 'spike'.")
 
             low_hz = min(f_pos[max(peaks.min()+1, 0)], high_hz/100)
 
-            # prepare for grid-refinement attempts
+            if target_type == 'glitch' and MinGlitchFreq > 0:
+                low_hz = max(low_hz, min(MinGlitchFreq, high_hz * 0.9))
+
             local_Omega = OmegaNum
             success = False
             amp_thresh = 1e-3 * np.linalg.norm(r)
+            zeta_candidates = np.asarray(ZetaList, dtype=float)
+            zeta_candidates = zeta_candidates[zeta_candidates >= MinZeta]
+            if zeta_candidates.size == 0:
+                zeta_candidates = np.array([MinZeta], dtype=float)
 
-            for refine in range(MaxGridRefine):
-                # 3. generate equal log-spaced frequency grid
+            for _ in range(MaxGridRefine):
+                # Build the candidate grid.
                 freq_grid = np.logspace(
                     np.log10(low_hz),
                     np.log10(high_hz),
@@ -97,9 +133,8 @@ class SWdecomp:
                 )
                 omegas = 2 * np.pi * freq_grid
 
-                # build candidates: Cartesian product of (omega, tau, zeta, phi)
                 W, TAU, ZETA, PHI = np.meshgrid(
-                    omegas, tau_candidates, ZetaList, PhisList,
+                    omegas, tau_candidates, zeta_candidates, PhisList,
                     indexing='ij'
                 )
                 cand_params = np.column_stack((
@@ -111,74 +146,154 @@ class SWdecomp:
                     PHI.ravel()
                 ))
 
-                # compute atoms and norms; valid atoms have norm > eps
                 atoms = self.recon(cand_params, t)
                 norms = np.linalg.norm(atoms, axis=0)
                 valid = norms > np.finfo(float).eps
                 if not np.any(valid):
-                    # refine grid resolution and retry
                     local_Omega *= 2
                     continue
                 atoms[:, ~valid] = 0
-                atoms /= norms
+                atoms[:, valid] /= norms[valid]
 
-                # pick best candidate by inner product
-                dots = np.abs(r @ atoms)
-                idx = np.argmax(dots)
+                valid_indices = np.flatnonzero(valid)
+                if target_type == "glitch":
+                    ranked = []
+                    for tau_value in tau_candidates:
+                        same_tau = valid_indices[
+                            np.isclose(cand_params[valid_indices, 3], tau_value)
+                        ]
+                        if same_tau.size == 0:
+                            continue
+
+                        left, right = local_bounds[float(tau_value)]
+                        mask = (t >= left) & (t <= right)
+                        local_atoms = atoms[mask][:, same_tau]
+                        local_norms = np.linalg.norm(local_atoms, axis=0)
+                        usable = local_norms > np.finfo(float).eps
+                        if not np.any(usable):
+                            continue
+
+                        scores = np.full(same_tau.size, -np.inf)
+                        scores[usable] = np.abs(
+                            r[mask] @ local_atoms[:, usable]
+                        ) / local_norms[usable]
+                        best = int(np.argmax(scores))
+                        ranked.append((scores[best], same_tau[best], mask))
+
+                    if not ranked:
+                        local_Omega *= 2
+                        continue
+
+                    _, idx, fit_mask = max(ranked, key=lambda item: item[0])
+                    fit_atom = atoms[fit_mask, idx]
+                    amp = np.dot(r[fit_mask], fit_atom / np.linalg.norm(fit_atom))
+                else:
+                    dots = np.abs(r @ atoms[:, valid_indices])
+                    idx = valid_indices[int(np.argmax(dots))]
+                    fit_mask = np.ones(len(t), dtype=bool)
+                    amp = np.dot(r, atoms[:, idx])
+
                 omega, t0, tau, zeta, phi = cand_params[idx, 1:]
-                amp = np.dot(r, atoms[:, idx])
+                lb = [
+                    -np.inf,
+                    low_hz * 2 * np.pi - 1e-6,
+                    -tau * TwoWay,
+                    -tau * TwoWay,
+                    MinZeta,
+                    -np.inf,
+                ]
+                ub = [
+                    np.inf,
+                    high_hz * 2 * np.pi + 1e-6,
+                    t.max(),
+                    t.max(),
+                    10000,
+                    np.inf,
+                ]
 
-                # local least-squares refinement
-                lb = [-np.inf, low_hz * 2 * np.pi - 1e-6, -tau * TwoWay, -tau * TwoWay, 0.0001, -np.inf]
-                ub = [np.inf, high_hz * 2 * np.pi + 1e-6, t.max(), t.max(), 10000, np.inf]
+                def resid(x):
+                    wf_fit = self.recon(x, t).flatten()
+                    if target_type != "glitch":
+                        return wf_fit - r
 
-                def resid(x): return self.recon(x, t).flatten() - r
+                    fit_error = wf_fit[fit_mask] - r[fit_mask]
+                    outside = ~fit_mask
+                    if LocalFitOutsidePenalty <= 0 or not np.any(outside):
+                        return fit_error
+                    return np.concatenate((
+                        fit_error,
+                        np.sqrt(LocalFitOutsidePenalty) * wf_fit[outside],
+                    ))
 
                 x_opt = least_squares(
                     resid,
                     [amp, omega, IniTim, tau, zeta, phi],
-                    bounds=(lb, ub)
+                    bounds=(lb, ub),
                 ).x
 
-                # check amplitude significance
                 if abs(x_opt[0]) > amp_thresh:
+                    wf = self.recon(x_opt, t).flatten()
                     success = True
                     break
-                # else refine grid and retry
+
                 local_Omega *= 2
 
             if not success:
-                # concise termination message for negligible atoms
-                print("\nTerminated: no meaningful atom found after grid refinements.")
                 break
 
-            # 4. update residual and record component
-            wf = self.recon(x_opt, t).flatten()
             r -= wf
             selected_params.append(x_opt)
             selected_waveforms.append(wf)
 
-            # 5. stopping criteria: residual energy low or enough components
             if np.sum(r**2) < ErrTol * energy0 and len(selected_params) >= MinSW:
-                print("Completed: residual energy below threshold.")
                 break
-        else:
-            # only executed if for-loop completes without a break
-            print("Completed: reached maximum iterations.")
 
-        # final sorting by energy contribution
+        # Sort components by energy.
         energies = np.array([np.sum(w**2) for w in selected_waveforms])
         order = np.argsort(-energies)
-        params = np.array(selected_params)[order]
-        comps = np.array(selected_waveforms).T[:, order] if selected_waveforms else np.array([])
+        params = (
+            np.array(selected_params)[order]
+            if selected_params
+            else np.empty((0, 6), dtype=float)
+        )
+        comps = (
+            np.array(selected_waveforms).T[:, order]
+            if selected_waveforms
+            else np.empty((len(t), 0), dtype=float)
+        )
         er = energies[order] / energy0
         er_cum = np.cumsum(er)
 
-        # report elapsed time
-        elapsed = time.time() - start_time
-        print(f"Finished decomposition in {elapsed:.2f} seconds.")
-
         return params, comps, er, er_cum
+#%%
+    @staticmethod
+    def local_fit_bounds(tau_candidates, t_min, t_max, padding=0.0):
+        """Return midpoint-bounded local fitting regions for candidate peaks."""
+        candidates = np.unique(np.asarray(tau_candidates, dtype=float))
+        candidates.sort()
+        bounds = {}
+
+        if candidates.size == 1:
+            bounds[float(candidates[0])] = (float(t_min), float(t_max))
+            return bounds
+
+        for i, center in enumerate(candidates):
+            left = (
+                t_min
+                if i == 0
+                else 0.5 * (candidates[i - 1] + center)
+            )
+            right = (
+                t_max
+                if i == candidates.size - 1
+                else 0.5 * (center + candidates[i + 1])
+            )
+            bounds[float(center)] = (
+                max(float(t_min), float(left - padding)),
+                min(float(t_max), float(right + padding)),
+            )
+
+        return bounds
 
     @staticmethod
     def recon(params, t, batch_size=2000):
